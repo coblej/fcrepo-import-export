@@ -21,7 +21,9 @@ import static org.apache.commons.codec.binary.Hex.encodeHex;
 import static org.apache.commons.io.FileUtils.byteCountToDisplaySize;
 import static org.apache.jena.rdf.model.ModelFactory.createDefaultModel;
 import static org.apache.jena.rdf.model.ResourceFactory.createProperty;
+import static org.apache.jena.rdf.model.ResourceFactory.createResource;
 import static org.fcrepo.importexport.common.FcrepoConstants.CONTAINER;
+import static org.fcrepo.importexport.common.FcrepoConstants.INBOUND_REFERENCES;
 import static org.fcrepo.importexport.common.FcrepoConstants.NON_RDF_SOURCE;
 import static org.fcrepo.importexport.common.TransferProcess.fileForBinary;
 import static org.fcrepo.importexport.common.TransferProcess.fileForExternalResources;
@@ -40,6 +42,7 @@ import java.net.URL;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.text.SimpleDateFormat;
+import java.util.Arrays;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -66,6 +69,8 @@ import org.fcrepo.importexport.common.TransferProcess;
 
 import org.apache.jena.rdf.model.Model;
 import org.apache.jena.rdf.model.NodeIterator;
+import org.apache.jena.rdf.model.ResIterator;
+import org.apache.jena.rdf.model.Resource;
 import org.slf4j.Logger;
 
 /**
@@ -276,9 +281,17 @@ public class Exporter implements TransferProcess {
         if (file == null) {
             logger.info("Skipping {}", uri);
             return;
+        } else if (file.exists()) {
+            logger.info("Already exported {}", uri);
+            return;
         }
 
-        try (FcrepoResponse response = client().get(uri).accept(config.getRdfLanguage()).perform()) {
+        GetBuilder getBuilder = client().get(uri).accept(config.getRdfLanguage());
+        if (config.retrieveInbound()) {
+            getBuilder = getBuilder.preferRepresentation(
+                Arrays.asList(new URI[]{ URI.create(INBOUND_REFERENCES.getURI()) }), null);
+        }
+        try (FcrepoResponse response = getBuilder.perform()) {
             checkValidResponse(response, uri);
             logger.info("Exporting description: {}", uri);
             writeResponse(response, null, file);
@@ -289,14 +302,23 @@ public class Exporter implements TransferProcess {
             exportLogger.error(String.format("Error exporting description: {}, Cause: {}", uri, ex.getMessage()), ex);
         }
 
-        exportMembers(file);
+        exportMembers(file, uri);
     }
-    private void exportMembers(final File file) {
+    private void exportMembers(final File file, final URI parentURI) {
         try {
+            final Resource parent = createResource(parentURI.toString());
             final Model model = createDefaultModel().read(new FileInputStream(file), null, config.getRdfLanguage());
             for (final String p : config.getPredicates()) {
-                for (final NodeIterator it = model.listObjectsOfProperty(createProperty(p)); it.hasNext();) {
-                    export(URI.create(it.nextNode().toString()));
+                final NodeIterator members = model.listObjectsOfProperty(parent, createProperty(p));
+                while (members.hasNext()) {
+                    export(URI.create(members.nextNode().toString()));
+                }
+
+                if (config.retrieveInbound()) {
+                    final ResIterator inbound = model.listSubjectsWithProperty(createProperty(p), parent);
+                    while (inbound.hasNext()) {
+                        export(URI.create(inbound.next().toString()));
+                    }
                 }
             }
         } catch (FileNotFoundException ex) {
